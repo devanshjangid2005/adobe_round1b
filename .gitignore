@@ -1,0 +1,4 @@
+# Ignore local Python environment
+.venv/
+__pycache__/
+*.pyc
