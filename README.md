@@ -3,8 +3,8 @@
 
 This repository implements a fully offline, CPU‑only pipeline for:
 
-1. **Round 1A**: Extracting document structure (title + H1–H3 headings with page numbers) from PDFs via a local LLM (`allenai/unifiedqa-t5-small`).
-2. **Round 1B**: Persona‑driven retrieval of the most relevant sections using a RAG approach (MiniLM + FAISS + TF–IDF) and batch summarization (`sshleifer/distilbart-cnn-6-6`).
+1. **Round 1A**: Extracting document structure (title + H1–H3 headings with page numbers) from PDFs using a heuristic‑based parser.
+2. **Round 1B**: Persona‑driven semantic retrieval of the most relevant sections using a SentenceTransformer (MiniLM) model for ranking.
 
 ---
 
@@ -14,16 +14,11 @@ This repository implements a fully offline, CPU‑only pipeline for:
 
 adobe\_round1b/
 ├── README.md
-├── main.py
-├── utils.py
-├── round1a\_extractor.py
-├── preprocess.py
-├── embed\_index.py
-├── retrieve\_rank.py
-├── summarize.py
+├── round1b\_solution.py
 ├── requirements.txt
 ├── input/                  ← place your .pdf files here
 │   └── \*.pdf
+├── input/challenge1b\_input.json  ← JSON specifying persona, job, and input docs
 └── output/                 ← generated JSON will appear here
 
 ````
@@ -32,20 +27,60 @@ adobe\_round1b/
 
 ## ⚙️ Prerequisites
 
-- Python 3.8+  
-- 2 GB free disk (for model caches & indexes)  
+- Python 3.8+ OR Docker
+- 2 GB free disk (for model caches & indexes)
 - Windows/Linux/macOS terminal
 
 ---
 
-## 📥 Installation
+## 🐳 Docker Setup
+
+You can run this pipeline entirely in Docker (no need to install Python locally).
+
+### 1️⃣ Build the Docker image
+```bash
+docker build -t adobe-hackathon-solution .
+````
+
+This will:
+
+* Download the MiniLM model (`all-MiniLM-L6-v2`) in a builder stage.
+* Copy it into the final container.
+* Install all required dependencies.
+
+---
+
+### 2️⃣ Run the container
+
+Make sure your PDFs and input JSON are in `input/`. Then:
+
+```bash
+docker run --rm \
+  -v ${PWD}/input:/app/input \
+  -v ${PWD}/output:/app/output \
+  adobe-hackathon-solution
+```
+
+This mounts your `input/` and `output/` folders into the container so results are stored locally.
+
+The container will process:
+
+* PDFs from `input/`
+* `input/challenge1b_input.json`
+* Write results to `output/challenge1b_output.json`
+
+---
+
+## 🚀 Running Locally (Without Docker)
+
+If you prefer running it directly:
 
 1. **Create & activate** a virtual environment:
 
    ```bash
    python3 -m venv venv
    source venv/bin/activate   # or .\venv\Scripts\Activate.ps1 on Windows
-````
+   ```
 
 2. **Install** dependencies:
 
@@ -53,140 +88,110 @@ adobe\_round1b/
    pip install -r requirements.txt
    ```
 
-   `requirements.txt` includes:
+3. **Run**:
 
-   ```
-   protobuf
-   tiktoken
-   sentencepiece
-   PyMuPDF
-   transformers>=4.33.2
-   torch>=1.13.1
-   sentence-transformers
-   faiss-cpu
-   scikit-learn
-   scipy
-   numpy
+   ```bash
+   python round1b_solution.py
    ```
 
 ---
 
-## ⬇️ Model Pre‑caching (ONE‑TIME, ONLINE)
+## 🧠 Approach Explained
 
-Before you run fully offline, **download** and cache the required models:
+### `round1b_solution.py` Workflow
 
-```bash
-python - <<'EOF'
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-from sentence_transformers import SentenceTransformer
+1. **Configuration:**
 
-# Round 1A extractor
-AutoTokenizer.from_pretrained("allenai/unifiedqa-t5-small")
-AutoModelForSeq2SeqLM.from_pretrained("allenai/unifiedqa-t5-small")
+   * Defines paths for input PDFs, the challenge JSON input file, the output file, and the embedding model (`all-MiniLM-L6-v2`).
 
-# RAG indexer
-SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+2. **PDF Parsing (Section & Subsection Extraction):**
 
-# Summarizer
-pipeline("summarization", model="sshleifer/distilbart-cnn-6-6")
-EOF
+   * Uses **PyMuPDF** to read PDFs.
+   * Collects font sizes across all pages to determine a **heading size threshold**.
+   * Iterates through blocks of text:
+
+     * If a block has a large font size and is short → treated as a **section heading**.
+     * Text blocks under it are grouped as **subsection content**.
+   * Returns a structured list of `{section_title, subsection_text, page_number}`.
+
+3. **Semantic Search & Ranking:**
+
+   * Loads the MiniLM SentenceTransformer.
+   * Reads persona and job context from `challenge1b_input.json`.
+   * Constructs a query: `"<persona>: <job_to_be_done>"`.
+   * Embeds both query and document sections using MiniLM.
+   * Ranks sections and subsections by **cosine similarity**.
+
+4. **Top‑K Selection:**
+
+   * Picks the **top 5 sections** and **top 5 subsections** most relevant to the persona’s query.
+
+5. **Output JSON:**
+
+   * Saves a JSON file with:
+
+     * `metadata` (persona, job, timestamp).
+     * `extracted_sections` (titles, pages, ranks).
+     * `subsection_analysis` (refined text chunks).
+
+---
+
+## 📋 Input & Output Example
+
+### Input (`input/challenge1b_input.json`)
+
+```json
+{
+  "persona": { "role": "Travel Planner" },
+  "job_to_be_done": { "task": "Plan a 4-day trip for 10 friends" },
+  "documents": [
+    { "filename": "guide.pdf" },
+    { "filename": "itinerary.pdf" }
+  ]
+}
 ```
 
-This caches:
+### Output (`output/challenge1b_output.json`)
 
-* `allenai/unifiedqa-t5-small`
-* `sentence-transformers/all-MiniLM-L6-v2`
-* `sshleifer/distilbart-cnn-6-6`
-
----
-
-## 🚀 Running the Pipeline (OFFLINE)
-
-Once cached, disable internet and run **end‑to‑end**:
-
-```bash
-python main.py \
-  --persona "Travel Planner" \
-  --job "Plan a trip of 4 days for a group of 10 college friends" \
-  --input_dir ./input \
-  --output_file ./output/challenge1b_output.json
+```json
+{
+  "metadata": { "input_documents": ["guide.pdf"], "persona": "Travel Planner", "job_to_be_done": "Plan a 4-day trip for 10 friends", "processing_timestamp": "..." },
+  "extracted_sections": [
+    { "document": "guide.pdf", "section_title": "Best Destinations", "importance_rank": 1, "page_number": 2 }
+  ],
+  "subsection_analysis": [
+    { "document": "guide.pdf", "refined_text": "Detailed itinerary...", "page_number": 2 }
+  ]
+}
 ```
-
-* `--persona`: describes the target reader
-* `--job`: describes the use‑case/query
-* `--input_dir`: folder with your `.pdf` files
-* `--output_file`: path for the final JSON
-
----
-
-## 📋 Input & Output
-
-* **Input**:
-
-  * Place your PDFs in `input/`.
-  * Round 1A JSON outlines are auto‑generated next to each PDF.
-
-* **Output**:
-
-  * Intermediate files:
-
-    * `chunks.pkl`, `faiss.index`, `meta.json`, `tfidf.pkl`, `tfidf.npz`
-  * **Final**: `output/challenge1b_output.json` containing:
-
-    ```jsonc
-    {
-      "metadata": { "documents": [...], "persona": "...", "job": "...", "timestamp": "..." },
-      "extracted_sections": [
-        { "document":"...pdf", "page":2, "section_title":"...", "score":0.93 },
-        …
-      ],
-      "subsection_analysis": [
-        { "doc_id":"...pdf", "page":2, "section_title":"…", "refined_text":"…" },
-        …
-      ]
-    }
-    ```
-
----
-
-## 🔧 Module Summaries
-
-* **`round1a_extractor.py`**
-  Chunk‑based LLM extraction of title + headings (local UnifiedQA).
-
-* **`preprocess.py`**
-  Reads the JSON outlines + PDFs → tokenized text chunks.
-
-* **`embed_index.py`**
-  Builds a FAISS index of MiniLM embeddings + precomputes TF–IDF.
-
-* **`retrieve_rank.py`**
-  Embeds the persona+job query → retrieves top‑K sections by hybrid cosine+TF–IDF.
-
-* **`summarize.py`**
-  Batch summarizes top sections with DistilBART.
-
-* **`main.py`**
-  Orchestrates the full Round 1A→1B pipeline.
 
 ---
 
 ## 🛠 Troubleshooting
 
-* **“Cannot find…cache and outgoing traffic disabled”**
-  Ensure you ran the **Model Pre‑caching** step online.
+* **Slow Docker build:** Ensure Docker DNS is set in `daemon.json`:
 
-* **Token limit warnings**
-  All chunks are truncated to ≤ 200 tokens; warnings can be ignored.
+  ```json
+  {
+    "dns": ["8.8.8.8", "8.8.4.4"]
+  }
+  ```
 
-* **Empty `chunks.pkl`**
-  Verify your Round 1A JSONs contain non‑empty `headings`.
+  Restart Docker Desktop afterward.
+
+* **Timeouts during pip install:** Increase pip timeout:
+
+  ```dockerfile
+  RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt
+  ```
+
+* **Empty sections in output:** Verify PDFs have extractable text (not scanned images).
 
 ---
 
 ## 📄 License
 
-This code is provided under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License.
 
 ```
-```
+
